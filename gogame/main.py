@@ -10,7 +10,9 @@ from .bot import Engine, HeuristicBot
 from .board import Color
 from .rules import GameState, Rules
 from .sgf import sgf_to_game
-from .ui import GoUI
+
+# gogame.app is imported inside main(): importing it builds a Kivy Window,
+# which needs a display, and nothing else in this module does.
 
 _BOT_COLOR_CHOICES = ["black", "white", "both", "none"]
 
@@ -54,8 +56,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     game = build_game(args)
     engines = _build_engines(args.bot_color)
-    ui = GoUI(game, engines)
-    ui.run()
+
+    from .app import GoApp
+    from .session import GameSession
+
+    GoApp(session=GameSession(game, engines=engines)).run()
 
 
 if __name__ == "__main__":

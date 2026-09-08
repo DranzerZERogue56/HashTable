@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# buildozer / python-for-android build output
+.buildozer/
+bin/

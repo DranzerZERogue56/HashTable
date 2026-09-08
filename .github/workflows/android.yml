@@ -1,0 +1,108 @@
+name: Android APK
+
+on:
+  push:
+    branches:
+      - claude/go-game-python-pygame-4azm9z
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to publish the APK as a release asset
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libmtdev1
+          python -m pip install --upgrade pip
+          pip install pytest kivy
+
+      # xvfb so the Kivy smoke tests run instead of skipping; the rules
+      # core, layout, session and storage tests need no display at all.
+      - name: Run tests
+        run: xvfb-run -a python -m pytest gogame/tests -q
+
+  build:
+    name: Build APK
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # buildozer's own Dockerfile pins openjdk 17; the runner's default
+      # JDK is newer and mismatches the Android Gradle Plugin.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install buildozer and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip autoconf automake libtool pkg-config \
+            zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev
+          python -m pip install --upgrade pip
+          pip install buildozer cython
+
+      # The first build downloads the Android SDK and NDK (several GB) and
+      # takes 35-50 min; cached runs are closer to 10-15.
+      - name: Cache buildozer state
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            .buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: Build debug APK
+        run: buildozer -v android debug
+
+      - name: Show what was built
+        run: ls -la bin/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gogame-apk
+          path: bin/*.apk
+          if-no-files-found: error
+
+      # A release asset has a plain public download URL, so the APK can be
+      # fetched straight from the phone's browser with no GitHub login and
+      # no zip wrapper (which is what workflow artifacts would give you).
+      - name: Publish APK to a rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Go for Android (latest build)
+          body: |
+            Debug-signed APK for arm64 Android, built from
+            `${{ github.sha }}`.
+
+            **Installing on a Samsung phone**
+            1. Settings -> Security and privacy -> **Auto Blocker: off**
+               (One UI 6.1.1+ enables this by default and it blocks all
+               sideloading).
+            2. Open this page in Chrome or Samsung Internet and tap the
+               `.apk` below.
+            3. Allow "Install unknown apps" for that browser when asked.
+            4. Play Protect will warn about a debug-signed app:
+               **More details -> Install anyway**.
+          files: bin/*.apk
+          fail_on_unmatched_files: true

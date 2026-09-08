@@ -1,8 +1,3 @@
-import os
-
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
-
 from gogame.board import Color
 from gogame.main import _build_engines, _parse_args, build_game
 from gogame.rules import GameState, Rules

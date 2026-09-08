@@ -1,7 +1,7 @@
 """Board state, group/liberty computation, capture resolution, Zobrist
 hashing, and basic (superko-unaware) legal move generation.
 
-This module has zero dependency on pygame or any other part of the
+This module has zero dependency on any UI framework or other part of the
 package: it implements the Tromp-Taylor rules
 (https://tromp.github.io/go.html) at the single-position level. Ko/superko
 requires game history and is handled one layer up, in rules.py.

@@ -1,7 +1,7 @@
 """Game state machine: move history, positional superko, pass/game-end
 handling, area scoring with komi, and handicap placement.
 
-Zero dependency on pygame; usable headlessly.
+Zero dependency on any UI framework; usable headlessly.
 """
 
 from __future__ import annotations
