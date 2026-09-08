@@ -243,6 +243,17 @@ class Board:
             new_board._set(point, color)
         return new_board
 
+    def remove_stones(self, points: "list[Point]") -> "Board":
+        """Return a new Board with `points` cleared to empty.
+
+        For scoring use (e.g. removing stones marked dead before an area
+        count): no capture resolution is performed, this just clears them.
+        """
+        new_board = self.copy()
+        for point in points:
+            new_board._set(point, Color.EMPTY)
+        return new_board
+
     def legal_moves(self, color: Color, allow_suicide: bool = False) -> List[Point]:
         """Superko-unaware legal moves: empty points that are not (illegal) suicide."""
         moves = []
