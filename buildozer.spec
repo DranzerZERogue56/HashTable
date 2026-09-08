@@ -14,7 +14,14 @@ version = 0.1
 # python-for-android's pygame recipe is listed as broken against current
 # SDL2, so the UI is Kivy, which is buildozer's default and best-supported
 # path. board/rules/sgf/bot are pure stdlib and need nothing here.
-requirements = python3,kivy
+#
+# charset-normalizer is pinned to the last pure-Python line on purpose.
+# p4a's kivy recipe declares python_depends on requests, which pulls
+# charset-normalizer; since 3.0 that ships compiled C extensions
+# (p4a issue #2755), and the android-tagged wheel p4a builds is then
+# rejected by the host pip with "not a supported wheel on this platform".
+# 2.x is py3-none-any, satisfies requests' >=2,<4, and installs cleanly.
+requirements = python3,kivy,charset-normalizer==2.1.1
 
 orientation = portrait
 fullscreen = 0
