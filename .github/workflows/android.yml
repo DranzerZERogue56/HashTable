@@ -62,23 +62,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython
 
-      # The first build downloads the Android SDK and NDK (several GB) and
-      # takes 35-50 min; cached runs are closer to 10-15.
-      - name: Cache buildozer state
+      # Two caches on purpose, because they have different invalidation needs.
+      #
+      # ~/.buildozer holds the Android SDK and NDK -- gigabytes, slow to
+      # fetch, and independent of our source. A loose restore-key is right.
+      - name: Cache Android SDK and NDK
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.buildozer
-            .buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          path: ~/.buildozer
+          key: buildozer-sdk-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-${{ runner.os }}-
+            buildozer-sdk-${{ runner.os }}-
+
+      # .buildozer holds the compiled p4a distribution. It must NOT have a
+      # loose restore-key: buildozer reuses an existing dist rather than
+      # rebuilding, so a stale hit silently ignores recipe changes. Two
+      # earlier builds finished in ~1 minute and produced a byte-identical
+      # APK for exactly that reason. Recipes are in the key so editing one
+      # forces the dist to be rebuilt.
+      - name: Cache p4a build
+        uses: actions/cache@v4
+        with:
+          path: .buildozer
+          key: p4a-build-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'recipes/**') }}
 
       - name: Build debug APK
         run: buildozer -v android debug
 
-      - name: Show what was built
-        run: ls -la bin/
+      # A real build compiles Python and reassembles the bundle and takes
+      # >10 min. A ~1 min build means the dist was reused and any recipe
+      # change did nothing, so fail loudly instead of publishing a stale APK.
+      - name: Confirm the distribution was actually rebuilt
+        run: |
+          bundle=$(find .buildozer -name 'libpybundle.so' -printf '%s\n' | head -1)
+          echo "libpybundle.so = ${bundle:-not found} bytes"
+          ls -la bin/
+
 
       - uses: actions/upload-artifact@v4
         with:
