@@ -19,6 +19,11 @@ requirements = python3,kivy
 orientation = portrait
 fullscreen = 0
 
+# Trims unused stdlib out of libpybundle.so. Note this REPLACES the
+# bootstrap's own blacklist rather than extending it, so the file starts
+# with a verbatim copy of it -- see the header in android-blacklist.txt.
+android.blacklist_src = ./android-blacklist.txt
+
 # minapi 24 clears both install floors: Android 14 refuses targetSdk < 23
 # and Android 15+ refuses < 24.
 android.api = 36
