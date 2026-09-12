@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - claude/go-game-python-pygame-4azm9z
+      - claude/go-game-apk-install-cxirei
   workflow_dispatch:
 
 permissions:
@@ -62,6 +63,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython
 
+      # Without this the Android Gradle Plugin mints a fresh debug key on
+      # every run (nothing caches ~/.android), and Android then refuses to
+      # install the new APK over a copy signed by an earlier run's key --
+      # reported on the phone as a bare "App not installed". See
+      # signing/README.md.
+      - name: Install the stable debug signing key
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
       # Two caches on purpose, because they have different invalidation needs.
       #
       # ~/.buildozer holds the Android SDK and NDK -- gigabytes, slow to
@@ -80,11 +91,16 @@ jobs:
       # earlier builds finished in ~1 minute and produced a byte-identical
       # APK for exactly that reason. Recipes are in the key so editing one
       # forces the dist to be rebuilt.
+      #
+      # The keystore is in the key too. The dist carries the gradle project
+      # and its previously signed APK, and rather than reason about whether
+      # gradle treats a swapped signing key as a changed task input, changing
+      # the key just rebuilds.
       - name: Cache p4a build
         uses: actions/cache@v4
         with:
           path: .buildozer
-          key: p4a-build-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'recipes/**') }}
+          key: p4a-build-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'recipes/**', 'signing/debug.keystore') }}
 
       - name: Build debug APK
         run: buildozer -v android debug
@@ -98,6 +114,40 @@ jobs:
           echo "libpybundle.so = ${bundle:-not found} bytes"
           ls -la bin/
 
+      # The whole point of committing the key is that this fingerprint never
+      # moves: an APK signed by anything else will not install over one an
+      # earlier build already put on the phone. Assert it rather than trust
+      # it, because a rotated key produces a valid APK and silent breakage.
+      - name: Verify the APK is signed with the expected key
+        env:
+          EXPECTED: B7E7298EF0A1C86DBEC18F2A214AC062EFE1651A8A41157AFC8796C36B3222DA
+        run: |
+          apksigner=$(find ~/.buildozer -type f -name apksigner | sort | tail -1)
+          if [ -z "$apksigner" ]; then
+            echo "apksigner not found in the Android SDK" >&2
+            exit 1
+          fi
+          apk=$(ls bin/*.apk | head -1)
+          "$apksigner" verify --print-certs "$apk" | tee certs.txt
+          actual=$(sed -n 's/.*SHA-256 digest: *//p' certs.txt | head -1 | tr -d ' ' | tr 'A-F' 'a-f')
+          expected=$(echo "$EXPECTED" | tr 'A-F' 'a-f')
+          echo "expected $expected"
+          echo "actual   $actual"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::APK signing certificate changed -- this APK will not" \
+                 "install over a build signed with the committed key." >&2
+            exit 1
+          fi
+
+      # Published in the release notes so a truncated mobile download (which
+      # fails to install with the same useless message a bad signature gives)
+      # can be told apart from a real packaging problem.
+      - name: Record the APK checksum
+        id: apk
+        run: |
+          apk=$(ls bin/*.apk | head -1)
+          echo "sha256=$(sha256sum "$apk" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c %s "$apk")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,14 +167,32 @@ jobs:
             Debug-signed APK for arm64 Android, built from
             `${{ github.sha }}`.
 
+            `sha256 ${{ steps.apk.outputs.sha256 }}`
+            (${{ steps.apk.outputs.size }} bytes)
+
             **Installing on a Samsung phone**
-            1. Settings -> Security and privacy -> **Auto Blocker: off**
+            1. **Uninstall any copy of "Go" already on the phone.** Builds
+               published before 2026-09-12 were each signed with a different
+               throwaway key, and Android refuses to install over an app
+               signed by a different key -- it just says "App not installed"
+               without saying why. Every build from here on shares one key,
+               so this is a one-time step.
+            2. Settings -> Security and privacy -> **Auto Blocker: off**
                (One UI 6.1.1+ enables this by default and it blocks all
                sideloading).
-            2. Open this page in Chrome or Samsung Internet and tap the
+            3. Open this page in Chrome or Samsung Internet and tap the
                `.apk` below.
-            3. Allow "Install unknown apps" for that browser when asked.
-            4. Play Protect will warn about a debug-signed app:
+            4. Allow "Install unknown apps" for that browser when asked.
+            5. Play Protect will warn about a debug-signed app:
                **More details -> Install anyway**.
+
+            If it still will not install, the download is the next thing to
+            check -- a mobile browser that gives up partway leaves a
+            truncated file that fails with the same unhelpful message. The
+            file must be exactly the byte count above; the phone's Downloads
+            list shows the size it actually got.
+
+            This APK is arm64-only, so it will also refuse to install on a
+            phone running a 32-bit build of Android.
           files: bin/*.apk
           fail_on_unmatched_files: true
