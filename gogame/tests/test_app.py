@@ -45,6 +45,23 @@ def _widget(session, width=600, height=600):
     return widget
 
 
+def test_rows_bottom_first_reverses_whole_rows():
+    """The board's stones are lit from above; getting this backwards would
+    light them from below and make them look like dents."""
+    top_first = bytes([1, 1, 1, 1, 2, 2, 2, 2,
+                       3, 3, 3, 3, 4, 4, 4, 4])
+    assert kivy_app._rows_bottom_first(top_first, 2, 2) == bytes(
+        [3, 3, 3, 3, 4, 4, 4, 4,
+         1, 1, 1, 1, 2, 2, 2, 2]
+    )
+
+
+def test_textures_are_generated_once_and_reused():
+    first = kivy_app._stone_texture(Color.BLACK)
+    assert kivy_app._stone_texture(Color.BLACK) is first
+    assert kivy_app._stone_texture(Color.WHITE) is not first
+
+
 def test_build_session_gives_the_bot_the_other_color():
     session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
     assert session.game.board.size == 9

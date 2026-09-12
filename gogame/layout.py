@@ -91,7 +91,9 @@ class Layout:
 
     @property
     def label_font_size(self) -> int:
-        return max(9, int(self.cell * 0.42))
+        # Floor scales with density: 9 raw pixels is legible on a desktop
+        # and a smear on a 3x phone panel.
+        return max(int(8 * self.density), int(self.cell * 0.38))
 
 
 def compute_layout(
