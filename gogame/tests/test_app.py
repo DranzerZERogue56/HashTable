@@ -26,6 +26,7 @@ try:
 except Exception as exc:  # pragma: no cover - depends on the machine, not the code
     pytest.skip(f"Kivy UI unavailable: {exc}", allow_module_level=True)
 
+from gogame import rulebook
 from gogame.board import Color
 from gogame.layout import pixel_at_point
 from gogame.session import Phase
@@ -138,3 +139,117 @@ def test_redraw_handles_a_board_size_with_no_star_points():
     session.game.board = session.game.board.__class__(11)
     widget = _widget(session)
     widget.redraw()  # must not raise on a size with no handicap table
+
+
+# -- the aids row, the rules screen and the result screen -------------------
+
+
+def _built_app(session):
+    """A GoApp with its screens constructed but no event loop running.
+
+    build() is what wires the ScreenManager up, and it is safe to call
+    directly: the Clock interval it schedules never fires because nothing
+    ticks the clock in a test.
+    """
+    app = kivy_app.GoApp(session=session, autosave=False)
+    app.build()
+    return app
+
+
+def _texts(widget):
+    return {child.text for child in widget.walk() if hasattr(child, "text")}
+
+
+def test_aids_row_offers_hints_and_the_rules():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    assert "Show moves" in _texts(app.board_screen.aids)
+    assert "Rules" in _texts(app.board_screen.aids)
+
+
+def test_show_moves_label_states_what_the_tap_will_do():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    session.toggle_hints()
+    app.board_screen.refresh()
+    assert "Hide moves" in _texts(app.board_screen.aids)
+
+
+def test_board_redraws_with_hints_switched_on():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    session.toggle_hints()
+    widget = _widget(session)
+    widget.redraw()  # would raise if the hint pass were broken
+
+
+def test_rules_screen_renders_every_section():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    shown = _texts(app.rules_screen)
+    for section in rulebook.SECTIONS:
+        assert section.title in shown, section.title
+        for paragraph in section.paragraphs:
+            assert paragraph in shown, paragraph
+
+
+def test_result_screen_appears_when_the_game_ends():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    assert app.manager.current == "board"
+    session.resign()
+    app.board_screen.refresh()
+    assert app.manager.current == "result"
+    assert app.result_screen.headline.text == "You lose"
+
+
+def test_reviewing_the_board_is_not_bounced_back_to_the_result():
+    """The announcement fires once; otherwise the next redraw drags the
+    player straight out of the final position they asked to look at."""
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    session.resign()
+    app.board_screen.refresh()
+    app.show_board()
+    app.board_screen.refresh()
+    assert app.manager.current == "board"
+
+
+def test_result_is_announced_again_after_a_new_game_ends():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    session.resign()
+    app.board_screen.refresh()
+    app.start_new_game(9, 7.5, 0, Color.BLACK)
+    assert app.manager.current == "board"
+    app.session.resign()
+    app.board_screen.refresh()
+    assert app.manager.current == "result"
+
+
+def test_resignation_shows_no_score_line():
+    """The board was never counted, so an area score printed under
+    "resigned" would read as though it were the result."""
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    session.resign()
+    app.board_screen.refresh()
+    text = app.result_screen.breakdown.text
+    assert "Captures" in text
+    assert "White 7.5" not in text
+
+
+def test_counted_finish_shows_both_scores():
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    app = _built_app(session)
+    session.game.pass_move()
+    session.game.pass_move()
+    session._sync_game_over()
+    session.finish_scoring()
+    app.board_screen.refresh()
+    assert "White 7.5" in app.result_screen.breakdown.text
+
+
+def test_back_leaves_any_screen_for_the_board():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_rules()
+    assert app._on_keyboard(None, 27) is True
+    assert app.manager.current == "board"

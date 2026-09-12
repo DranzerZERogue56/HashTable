@@ -13,7 +13,7 @@ misplaced stone in Go cannot be taken back.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from .board import Color, Point, opponent
 from .bot import Engine
@@ -50,6 +50,8 @@ class GameSession:
         self.dead_stones: Set[Point] = set()
         self.pending_point: Optional[Point] = None
         self.resigned_by: Optional[Color] = None
+        self.show_hints = False
+        self._hint_cache: Optional[Tuple[Tuple[int, Color], Tuple[Point, ...]]] = None
         self.phase = Phase.SCORING if game.game_over else Phase.PLAYING
 
     # -- queries -------------------------------------------------------
@@ -67,6 +69,12 @@ class GameSession:
 
     def is_human_turn(self) -> bool:
         return not self.is_over and self.game.to_move not in self.engines
+
+    def human_color(self) -> Optional[Color]:
+        """The colour the person playing has, or None if that is not one
+        colour -- hotseat, where they play both, and watching two bots."""
+        humans = [c for c in (Color.BLACK, Color.WHITE) if c not in self.engines]
+        return humans[0] if len(humans) == 1 else None
 
     @property
     def last_move_point(self) -> Optional[Point]:
@@ -89,6 +97,31 @@ class GameSession:
             return opponent(self.resigned_by)
         return self.score().winner
 
+    def toggle_hints(self) -> bool:
+        self.show_hints = not self.show_hints
+        return True
+
+    def hint_points(self) -> Tuple[Point, ...]:
+        """Legal moves for the side to move, when hints are switched on.
+
+        Cached against the position, because enumerating them costs a
+        trial play per empty intersection -- ~20 ms on a 19x19 on a
+        desktop and several times that on a phone -- while the board
+        redraws on every tap and every bot tick. The key includes the
+        colour to move, since legality is not the same for both.
+
+        Empty while a bot is thinking or the game is over: there is no
+        move for the player to make, so there is nothing to point at.
+        """
+        if not self.show_hints or not self.is_human_turn():
+            return ()
+        key = (self.game.board.zobrist_hash(), self.to_move)
+        if self._hint_cache is not None and self._hint_cache[0] == key:
+            return self._hint_cache[1]
+        points = tuple(self.game.legal_moves())
+        self._hint_cache = (key, points)
+        return points
+
     def status_text(self) -> str:
         if self.phase == Phase.RESIGNED:
             assert self.resigned_by is not None
@@ -101,6 +134,25 @@ class GameSession:
         if self.phase == Phase.PENDING_CONFIRM:
             return "Confirm your move"
         return f"{self.to_move.name.title()} to play"
+
+    def result_headline(self) -> str:
+        """Said in the second person when one colour is clearly 'you'."""
+        winner = self.winner
+        if winner is None:
+            return "Draw"
+        you = self.human_color()
+        if you is None:
+            return f"{winner.name.title()} wins"
+        return "You win" if winner == you else "You lose"
+
+    def result_detail(self) -> str:
+        if self.resigned_by is not None:
+            return f"{self.resigned_by.name.title()} resigned"
+        score = self.score()
+        margin = abs(score.black - score.white)
+        if margin == 0:
+            return "The score is level"
+        return f"by {margin:g} point{'' if margin == 1 else 's'}"
 
     # -- placement -----------------------------------------------------
 

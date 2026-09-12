@@ -41,25 +41,36 @@ from kivy.uix.boxlayout import BoxLayout  # noqa: E402
 from kivy.uix.button import Button  # noqa: E402
 from kivy.uix.label import Label  # noqa: E402
 from kivy.uix.screenmanager import NoTransition, Screen, ScreenManager  # noqa: E402
+from kivy.uix.scrollview import ScrollView  # noqa: E402
 from kivy.uix.spinner import Spinner  # noqa: E402
 from kivy.uix.widget import Widget  # noqa: E402
 
-from . import skin, storage
+from . import rulebook, skin, storage
 from .board import Color
 from .bot import Engine, HeuristicBot
 from .layout import column_label, compute_layout, pixel_at_point, point_at_pixel, row_label
 from .rules import GameState, Rules, standard_handicap_points
 from .session import GameSession, Phase
 
-__all__ = ["GoApp", "BoardWidget", "PanelButton", "PanelSpinner", "build_session"]
+__all__ = [
+    "GoApp", "BoardWidget", "PanelButton", "PanelSpinner", "StoneBadge",
+    "RulesScreen", "ResultScreen", "build_session",
+]
 
 BOARD_SIZES = [9, 13, 19]
 KOMI_CHOICES = ["0.5", "5.5", "6.5", "7.5"]
 BOT_TICK_SECONDS = 0.35
 
-PANEL_PORTRAIT_DP = 150
-PANEL_LANDSCAPE_DP = 210
+# The board grid is limited by screen *width*, and in portrait there is
+# far more height than it needs, so a taller panel costs the board
+# nothing until it eats into that slack.
+PANEL_PORTRAIT_DP = 212
+# Wider than it used to be so three buttons fit across it. In landscape
+# the grid is limited by height, so the panel can take width from the
+# board area without the board getting any smaller.
+PANEL_LANDSCAPE_DP = 264
 BUTTON_HEIGHT_DP = 60  # comfortably above Android's 48dp touch minimum
+AID_HEIGHT_DP = 46     # secondary row: still over the 48dp target with padding
 CORNER_DP = 6
 SLAB_INSET_DP = 6  # narrow strip of table showing around the board
 
@@ -286,6 +297,7 @@ class BoardWidget(Widget):
             self._draw_slab(lay)
             self._draw_grid(lay, size, density)
             self._draw_star_points(lay, size)
+            self._draw_hints(session, lay)
             self._draw_coordinate_labels(lay, size)
             self._draw_stones(session.game.board, lay)
             self._draw_annotations(session, lay)
@@ -374,6 +386,27 @@ class BoardWidget(Widget):
         texture = _dot_texture(skin.GRID_LINE, "line")
         Paint(1, 1, 1, 1)
         for point in self._star_points(size):
+            x, y = self._to_widget(*pixel_at_point(point, lay))
+            Rectangle(
+                texture=texture,
+                pos=(x - radius, y - radius),
+                size=(radius * 2, radius * 2),
+            )
+
+    def _draw_hints(self, session, lay) -> None:
+        """A dot on every point the side to move may legally play.
+
+        Smaller than a star point and translucent, because on an open
+        board this is nearly every intersection -- the information the
+        player is actually after is where the dots are *missing*.
+        """
+        points = session.hint_points()
+        if not points:
+            return
+        radius = max(dp(2.0), lay.cell / 8.0)
+        texture = _dot_texture(skin.HINT, "hint")
+        Paint(1, 1, 1, 0.5)
+        for point in points:
             x, y = self._to_widget(*pixel_at_point(point, lay))
             Rectangle(
                 texture=texture,
@@ -588,10 +621,15 @@ class BoardScreen(Screen):
         )
         self.detail.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
         self.buttons = BoxLayout(spacing=dp(8), size_hint_y=None, height=dp(BUTTON_HEIGHT_DP))
+        # Aids sit on their own row and are present in every phase, so the
+        # rules are always one tap away and the row above stays free to
+        # change with the phase.
+        self.aids = BoxLayout(spacing=dp(8), size_hint_y=None, height=dp(AID_HEIGHT_DP))
 
         self.panel.add_widget(self.status)
         self.panel.add_widget(self.detail)
         self.panel.add_widget(self.buttons)
+        self.panel.add_widget(self.aids)
         self.box.add_widget(self.board)
         self.box.add_widget(self.panel)
         self.add_widget(self.box)
@@ -624,8 +662,13 @@ class BoardScreen(Screen):
         self.status.text = session.status_text()
         self.detail.text = self._detail_text(session)
         self._rebuild_buttons(session)
+        self._rebuild_aids(session)
         self.board.redraw()
         self.app.persist()
+        if session.phase in (Phase.FINISHED, Phase.RESIGNED):
+            self.app.announce_result()
+        else:
+            self.app.clear_result_announcement()
 
     def _detail_text(self, session: GameSession) -> str:
         score = session.score()
@@ -644,6 +687,24 @@ class BoardScreen(Screen):
             button.bind(on_release=lambda _b, cb=callback: cb())
             self.buttons.add_widget(button)
 
+    def _rebuild_aids(self, session: GameSession) -> None:
+        self.aids.clear_widgets()
+
+        # The label states what the tap will do rather than what is on, so
+        # the button needs no separate lit-up state to be unambiguous.
+        toggle = PanelButton(
+            text="Hide moves" if session.show_hints else "Show moves",
+            font_size=dp(14),
+        )
+        toggle.disabled = not session.is_human_turn()
+        flip = self._do(session.toggle_hints)
+        toggle.bind(on_release=lambda *_: flip())
+        self.aids.add_widget(toggle)
+
+        rules = PanelButton(text="Rules", font_size=dp(14))
+        rules.bind(on_release=lambda *_: self.app.show_rules())
+        self.aids.add_widget(rules)
+
     def _button_spec(self, session: GameSession) -> List[Tuple[str, Callable[[], None], bool]]:
         if session.phase == Phase.PENDING_CONFIRM:
             return [
@@ -655,13 +716,19 @@ class BoardScreen(Screen):
                 ("Done", self._do(session.finish_scoring), True),
                 ("New game", self.app.show_new_game, True),
             ]
+        # Result gets the player back to the summary after Review board,
+        # which is otherwise a one-way trip.
         if session.phase == Phase.FINISHED:
             return [
                 ("Mark dead", self._do(session.resume_scoring), True),
+                ("Result", self.app.show_result, True),
                 ("New game", self.app.show_new_game, True),
             ]
         if session.phase == Phase.RESIGNED:
-            return [("New game", self.app.show_new_game, True)]
+            return [
+                ("Result", self.app.show_result, True),
+                ("New game", self.app.show_new_game, True),
+            ]
         return [
             ("Pass", self._do(session.pass_move), session.is_human_turn()),
             ("Resign", self._do(session.resign), True),
@@ -744,6 +811,164 @@ class NewGameScreen(Screen):
         )
 
 
+class StoneBadge(Widget):
+    """One large stone, shaded and shadowed like the ones on the board.
+
+    Reuses the board's own textures, so the result screen is visibly part
+    of the same game rather than a dialog bolted onto it.
+    """
+
+    def __init__(self, color: Optional[Color] = None, **kwargs):
+        super().__init__(**kwargs)
+        self._color = color
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    def set_color(self, color: Optional[Color]) -> None:
+        self._color = color
+        self._redraw()
+
+    def _redraw(self, *_args) -> None:
+        self.canvas.clear()
+        side = min(self.width, self.height)
+        if self._color not in (Color.BLACK, Color.WHITE) or side <= 0:
+            return
+        halo = side * 0.66
+        drop = side * 0.05
+        with self.canvas:
+            Paint(1, 1, 1, 1)
+            Rectangle(
+                texture=_shadow_texture(),
+                pos=(self.center_x - halo + drop, self.center_y - halo - drop),
+                size=(halo * 2, halo * 2),
+            )
+            Rectangle(
+                texture=_stone_texture(self._color),
+                pos=(self.center_x - side / 2, self.center_y - side / 2),
+                size=(side, side),
+            )
+
+
+class ResultScreen(Screen):
+    """Shown once when the game ends, and on demand afterwards."""
+
+    def __init__(self, app: "GoApp", **kwargs):
+        super().__init__(**kwargs)
+        self.app = app
+        root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(8))
+        _wood_fill(root)
+
+        self.badge = StoneBadge(size_hint_y=None, height=dp(120))
+        self.headline = Label(
+            text="", color=(*skin.TEXT, 1), bold=True, font_size=dp(34),
+            size_hint_y=None, height=dp(52),
+        )
+        self.detail = Label(
+            text="", color=(*skin.TEXT_MUTED, 1), font_size=dp(19),
+            size_hint_y=None, height=dp(30),
+        )
+        self.breakdown = Label(
+            text="", color=(*skin.TEXT_MUTED, 1), font_size=dp(16),
+            halign="center", valign="middle", size_hint_y=None, height=dp(58),
+        )
+        self.breakdown.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+
+        buttons = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(58))
+        again = PanelButton(text="New game", font_size=dp(17), bold=True)
+        again.bind(on_release=lambda *_: self.app.show_new_game())
+        review = PanelButton(text="Review board", font_size=dp(17))
+        review.bind(on_release=lambda *_: self.app.show_board())
+        buttons.add_widget(again)
+        buttons.add_widget(review)
+
+        # Flexible spacers above and below, so the stone and the verdict
+        # sit centred in whatever is left above the buttons rather than
+        # bunching at the top of a tall empty screen.
+        root.add_widget(Widget())
+        root.add_widget(self.badge)
+        root.add_widget(self.headline)
+        root.add_widget(self.detail)
+        root.add_widget(self.breakdown)
+        root.add_widget(Widget())
+        root.add_widget(buttons)
+        self.add_widget(root)
+
+    def refresh(self, *_args) -> None:
+        session = self.app.session
+        self.badge.set_color(session.winner)
+        self.headline.text = session.result_headline()
+        self.detail.text = session.result_detail()
+        captures = (
+            f"Captures  B {session.captures_by(Color.BLACK)}"
+            f"   W {session.captures_by(Color.WHITE)}"
+        )
+        if session.resigned_by is not None:
+            # No score line after a resignation: the board was never
+            # counted, and an area count printed under "resigned" reads as
+            # though it were the result.
+            self.breakdown.text = captures
+        else:
+            score = session.score()
+            self.breakdown.text = (
+                f"Black {score.black:g}    White {score.white:g}\n{captures}"
+            )
+
+
+class RulesScreen(Screen):
+    """The rulebook, scrollable, with Back pinned below it."""
+
+    def __init__(self, app: "GoApp", **kwargs):
+        super().__init__(**kwargs)
+        self.app = app
+        root = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(8))
+        _wood_fill(root)
+
+        root.add_widget(
+            Label(
+                text="How to play Go", color=(*skin.TEXT, 1), bold=True,
+                font_size=dp(24), size_hint_y=None, height=dp(44),
+            )
+        )
+
+        scroll = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        column = BoxLayout(
+            orientation="vertical", size_hint_y=None, spacing=dp(6),
+            padding=(0, 0, dp(8), dp(16)),
+        )
+        column.bind(minimum_height=column.setter("height"))
+        for index, section in enumerate(rulebook.SECTIONS):
+            if index:
+                column.add_widget(Widget(size_hint_y=None, height=dp(14)))
+            column.add_widget(self._line(section.title, dp(18), skin.TEXT, bold=True))
+            for paragraph in section.paragraphs:
+                column.add_widget(self._line(paragraph, dp(15), skin.TEXT_MUTED))
+        scroll.add_widget(column)
+        root.add_widget(scroll)
+
+        back = PanelButton(text="Back", size_hint_y=None, height=dp(52), font_size=dp(17))
+        back.bind(on_release=lambda *_: self.app.show_board())
+        root.add_widget(back)
+        self.add_widget(root)
+
+    @staticmethod
+    def _line(text: str, font_size: float, color: skin.RGB, bold: bool = False) -> Label:
+        """A Label sized to its wrapped text.
+
+        A Label has no intrinsic height, so inside a scrolling column it
+        needs both bindings: width -> where to wrap, and the resulting
+        texture height -> how tall the widget is. Without the second the
+        paragraphs all collapse to the default 100px and overlap.
+        """
+        label = Label(
+            text=text, color=(*color, 1), font_size=font_size, bold=bold,
+            halign="left", valign="top", size_hint_y=None,
+        )
+        label.bind(
+            width=lambda w, value: setattr(w, "text_size", (value, None)),
+            texture_size=lambda w, value: setattr(w, "height", value[1]),
+        )
+        return label
+
+
 class GoApp(App):
     title = "Go"
 
@@ -752,6 +977,7 @@ class GoApp(App):
         self.autosave = autosave
         self.session = session or self._restore_or_new()
         self._tick_event = None
+        self._result_announced = False
 
     def _restore_or_new(self) -> GameSession:
         if self.autosave:
@@ -764,8 +990,13 @@ class GoApp(App):
         self.manager = ScreenManager(transition=NoTransition())
         self.board_screen = BoardScreen(self, name="board")
         self.new_game_screen = NewGameScreen(self, name="new")
-        self.manager.add_widget(self.board_screen)
-        self.manager.add_widget(self.new_game_screen)
+        self.rules_screen = RulesScreen(self, name="rules")
+        self.result_screen = ResultScreen(self, name="result")
+        for screen in (
+            self.board_screen, self.new_game_screen,
+            self.rules_screen, self.result_screen,
+        ):
+            self.manager.add_widget(screen)
         self.board_screen.refresh()
         Window.bind(on_keyboard=self._on_keyboard)
         self._tick_event = Clock.schedule_interval(self._tick, BOT_TICK_SECONDS)
@@ -775,6 +1006,31 @@ class GoApp(App):
 
     def show_new_game(self) -> None:
         self.manager.current = "new"
+
+    def show_board(self) -> None:
+        self.manager.current = "board"
+
+    def show_rules(self) -> None:
+        self.manager.current = "rules"
+
+    def show_result(self) -> None:
+        self.result_screen.refresh()
+        self.manager.current = "result"
+
+    def announce_result(self) -> None:
+        """Show the result screen when the game ends -- but only once.
+
+        Only once because Review board sends the player back to the final
+        position, and re-announcing on the next redraw would bounce them
+        straight out of it again.
+        """
+        if self._result_announced:
+            return
+        self._result_announced = True
+        self.show_result()
+
+    def clear_result_announcement(self) -> None:
+        self._result_announced = False
 
     def start_new_game(
         self, board_size: int, komi: float, handicap: int, human_color: Optional[Color]
@@ -802,7 +1058,7 @@ class GoApp(App):
     def _on_keyboard(self, _window, key, *_args) -> bool:
         if key != 27:  # ESC, and Android's BACK button
             return False
-        if self.manager.current == "new":
+        if self.manager.current != "board":
             self.manager.current = "board"
             return True
         return self.board_screen.handle_back()

@@ -1,4 +1,4 @@
-from gogame.board import Board, Color
+from gogame.board import Board, Color, opponent
 from gogame.bot import HeuristicBot
 from gogame.rules import GameState, Rules
 from gogame.session import GameSession, Phase, compute_score_with_dead_stones
@@ -255,3 +255,145 @@ def test_compute_score_with_dead_stones_matches_session_score():
     result = compute_score_with_dead_stones(game, set())
     assert result.black == 10.0
     assert result.white == 10.5
+
+
+# -- legal-move hints ------------------------------------------------------
+
+
+def _human_session(size=9, human=Color.BLACK):
+    """A session where one colour is played by a person, so hints apply."""
+    game = GameState(Rules(board_size=size))
+    bot = HeuristicBot(opponent(human))
+    return GameSession(game, engines={opponent(human): bot})
+
+
+def test_hints_are_off_until_asked_for():
+    session = _human_session()
+    assert session.show_hints is False
+    assert session.hint_points() == ()
+
+
+def test_toggling_hints_lists_the_legal_moves():
+    session = _human_session()
+    session.toggle_hints()
+    assert session.show_hints is True
+    # Everything on an empty board is legal, and nothing is off-board.
+    assert len(session.hint_points()) == 81
+    assert set(session.hint_points()) == set(session.game.board.all_points())
+
+
+def test_hints_turn_back_off():
+    session = _human_session()
+    session.toggle_hints()
+    session.toggle_hints()
+    assert session.hint_points() == ()
+
+
+def test_hints_exclude_occupied_points():
+    session = _human_session()
+    session.toggle_hints()
+    session.tap_point((4, 4))
+    session.confirm()
+    session.maybe_play_bot_move()
+    assert (4, 4) not in session.hint_points()
+
+
+def test_hints_are_empty_when_it_is_not_the_players_turn():
+    """Nothing to point at while the bot is to move."""
+    session = _human_session(human=Color.WHITE)  # bot has Black, so it moves first
+    session.toggle_hints()
+    assert session.is_human_turn() is False
+    assert session.hint_points() == ()
+
+
+def test_hints_are_empty_once_the_game_is_over():
+    session = _human_session()
+    session.toggle_hints()
+    session.game.pass_move()
+    session.game.pass_move()
+    session._sync_game_over()
+    assert session.hint_points() == ()
+
+
+def test_hint_cache_is_invalidated_when_the_board_changes():
+    """The cache is keyed on the position; a stale hit would offer a move
+    on a point that is now occupied."""
+    session = _human_session()
+    session.toggle_hints()
+    first = session.hint_points()
+    session.tap_point((2, 2))
+    session.confirm()
+    session.maybe_play_bot_move()
+    second = session.hint_points()
+    assert first != second
+    assert (2, 2) not in second
+
+
+# -- who is "you", and how the game ended -----------------------------------
+
+
+def test_human_color_is_the_side_without_an_engine():
+    assert _human_session(human=Color.BLACK).human_color() == Color.BLACK
+    assert _human_session(human=Color.WHITE).human_color() == Color.WHITE
+
+
+def test_human_color_is_undefined_for_hotseat_and_for_watching_bots():
+    hotseat = GameSession(GameState(Rules(board_size=9)))
+    assert hotseat.human_color() is None
+
+    both = GameSession(
+        GameState(Rules(board_size=9)),
+        engines={Color.BLACK: HeuristicBot(Color.BLACK),
+                 Color.WHITE: HeuristicBot(Color.WHITE)},
+    )
+    assert both.human_color() is None
+
+
+def test_result_is_second_person_when_one_colour_is_the_player():
+    session = _human_session(human=Color.BLACK)
+    session.resign()  # Black, the player, resigns
+    assert session.result_headline() == "You lose"
+    assert session.result_detail() == "Black resigned"
+
+    other = _human_session(human=Color.BLACK)
+    other.game.pass_move()          # Black passes
+    other.resign()                  # now White, the bot, resigns
+    assert other.result_headline() == "You win"
+    assert other.result_detail() == "White resigned"
+
+
+def test_result_names_the_colour_when_there_is_no_single_player():
+    hotseat = GameSession(GameState(Rules(board_size=9)))
+    hotseat.resign()
+    assert hotseat.result_headline() == "White wins"
+
+
+def test_result_detail_counts_the_margin_in_points():
+    session = _human_session()
+    session.game.pass_move()
+    session.game.pass_move()
+    session._sync_game_over()
+    session.finish_scoring()
+    # Empty board: White leads by komi alone.
+    assert session.result_detail() == "by 7.5 points"
+
+
+def test_result_detail_uses_the_singular_for_a_one_point_margin():
+    game = GameState(Rules(board_size=9, komi=1.0))
+    session = GameSession(game)
+    session.game.pass_move()
+    session.game.pass_move()
+    session._sync_game_over()
+    session.finish_scoring()
+    assert session.result_detail() == "by 1 point"
+
+
+def test_a_level_game_is_a_draw():
+    game = GameState(Rules(board_size=9, komi=0.0))
+    session = GameSession(game)
+    session.game.pass_move()
+    session.game.pass_move()
+    session._sync_game_over()
+    session.finish_scoring()
+    assert session.result_headline() == "Draw"
+    assert session.result_detail() == "The score is level"

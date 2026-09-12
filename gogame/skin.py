@@ -36,6 +36,7 @@ __all__ = [
     "BLACK_STONE",
     "WHITE_STONE",
     "MARKER",
+    "HINT",
     "PANEL_BG",
     "PANEL_EDGE",
     "TEXT",
@@ -62,6 +63,9 @@ GRID_LINE: RGB = (0.153, 0.098, 0.043)
 BLACK_STONE: RGB = (0.075, 0.082, 0.098)  # slate: not pure black, faintly blue
 WHITE_STONE: RGB = (0.957, 0.937, 0.886)  # clamshell: warm, never clinical
 MARKER: RGB = (0.706, 0.145, 0.129)
+# Legal-move dots. Green against the red of the pending-move ring, so
+# "you may play here" and "about to play here" never look alike.
+HINT: RGB = (0.145, 0.373, 0.212)
 PANEL_BG: RGB = (0.129, 0.090, 0.071)
 PANEL_EDGE: RGB = (0.298, 0.212, 0.145)
 TEXT: RGB = (0.949, 0.906, 0.824)
