@@ -63,16 +63,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython
 
-      # Without this the Android Gradle Plugin mints a fresh debug key on
-      # every run (nothing caches ~/.android), and Android then refuses to
-      # install the new APK over a copy signed by an earlier run's key --
-      # reported on the phone as a bare "App not installed". See
-      # signing/README.md.
-      - name: Install the stable debug signing key
-        run: |
-          mkdir -p ~/.android
-          cp signing/debug.keystore ~/.android/debug.keystore
-
       # Two caches on purpose, because they have different invalidation needs.
       #
       # ~/.buildozer holds the Android SDK and NDK -- gigabytes, slow to
@@ -91,16 +81,11 @@ jobs:
       # earlier builds finished in ~1 minute and produced a byte-identical
       # APK for exactly that reason. Recipes are in the key so editing one
       # forces the dist to be rebuilt.
-      #
-      # The keystore is in the key too. The dist carries the gradle project
-      # and its previously signed APK, and rather than reason about whether
-      # gradle treats a swapped signing key as a changed task input, changing
-      # the key just rebuilds.
       - name: Cache p4a build
         uses: actions/cache@v4
         with:
           path: .buildozer
-          key: p4a-build-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'recipes/**', 'signing/debug.keystore') }}
+          key: p4a-build-${{ runner.os }}-${{ hashFiles('buildozer.spec', 'recipes/**') }}
 
       - name: Build debug APK
         run: buildozer -v android debug
@@ -113,6 +98,39 @@ jobs:
           bundle=$(find .buildozer -name 'libpybundle.so' -printf '%s\n' | head -1)
           echo "libpybundle.so = ${bundle:-not found} bytes"
           ls -la bin/
+
+      # buildozer's debug path declares no signing config, so the Android
+      # Gradle Plugin signs with its own default debug key and mints a fresh
+      # one per run -- which is why an APK would not install over one an
+      # earlier build had put on the phone. Re-signing here rather than
+      # planting a keystore for AGP to find is deliberate: run 8 of this
+      # workflow copied the committed key to ~/.android/debug.keystore and
+      # AGP signed with a new key anyway (90a88072..., not b7e7298e...), so
+      # its keystore lookup is not somewhere this workflow can rely on.
+      # apksigner takes the key as an argument and cannot be wrong about it.
+      - name: Re-sign the APK with the committed key
+        run: |
+          apksigner=$(find ~/.buildozer -type f -name apksigner | sort | tail -1)
+          if [ -z "$apksigner" ]; then
+            echo "apksigner not found in the Android SDK" >&2
+            exit 1
+          fi
+          apk=$(ls bin/*.apk | head -1)
+          "$apksigner" verify --print-certs "$apk" \
+            | sed -n 's/.*SHA-256 digest: */  gradle signed it with /p' | head -1
+          # v4 signing would emit a separate .idsig file that nothing here
+          # ships; minSdk 24 means v2/v3 only, and no v1, which is what the
+          # manifest asks for.
+          "$apksigner" sign \
+            --ks signing/debug.keystore \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias androiddebugkey \
+            --min-sdk-version 24 \
+            --v4-signing-enabled false \
+            --out "$apk.resigned" "$apk"
+          mv "$apk.resigned" "$apk"
+          rm -f "$apk.resigned.idsig"
 
       # The whole point of committing the key is that this fingerprint never
       # moves: an APK signed by anything else will not install over one an
@@ -137,6 +155,17 @@ jobs:
             echo "::error::APK signing certificate changed -- this APK will not" \
                  "install over a build signed with the committed key." >&2
             exit 1
+          fi
+
+          # Re-signing rewrites the archive, and Android refuses to install a
+          # package whose resources.arsc is not 4-byte aligned (it mmaps it).
+          # apksigner is supposed to preserve the alignment gradle's zipalign
+          # produced; check rather than assume.
+          zipalign=$(find ~/.buildozer -type f -name zipalign | sort | tail -1)
+          if [ -n "$zipalign" ]; then
+            "$zipalign" -c -v 4 "$apk" > /dev/null && echo "zipalign: 4-byte aligned"
+          else
+            echo "zipalign not found, alignment unverified" >&2
           fi
 
       # Published in the release notes so a truncated mobile download (which
