@@ -26,7 +26,7 @@ try:
 except Exception as exc:  # pragma: no cover - depends on the machine, not the code
     pytest.skip(f"Kivy UI unavailable: {exc}", allow_module_level=True)
 
-from gogame import rulebook
+from gogame import rulebook, safearea
 from gogame.board import Color
 from gogame.layout import pixel_at_point
 from gogame.session import Phase
@@ -253,3 +253,57 @@ def test_back_leaves_any_screen_for_the_board():
     app.show_rules()
     assert app._on_keyboard(None, 27) is True
     assert app.manager.current == "board"
+
+
+# -- keeping clear of the system bars --------------------------------------
+
+
+def test_safe_area_is_an_ordinary_box_when_nothing_is_in_the_way():
+    area = kivy_app.SafeArea()
+    assert area.padding == [0, 0, 0, 0]
+
+
+def test_safe_area_pads_by_the_reported_insets(monkeypatch):
+    """A Samsung in three-button mode: status bar on top, navigation bar
+    below, both in pixels at the panel's real density."""
+    bars = safearea.Insets(left=0, top=96, right=0, bottom=144)
+    monkeypatch.setattr(kivy_app.safearea, "current", lambda: bars)
+    area = kivy_app.SafeArea()
+    assert area.padding == [0, 96, 0, 144]
+
+
+def test_safe_area_follows_a_change_of_navigation_mode(monkeypatch):
+    """Switching from three buttons to gestures shrinks the bottom bar,
+    and the poll has to pick that up rather than keep the old padding."""
+    bars = safearea.Insets(top=96, bottom=144)
+    monkeypatch.setattr(kivy_app.safearea, "current", lambda: bars)
+    area = kivy_app.SafeArea()
+    assert area.padding == [0, 96, 0, 144]
+
+    bars = safearea.Insets(top=96, bottom=72)
+    area.reread()
+    assert area.padding == [0, 96, 0, 72]
+
+
+def test_the_app_roots_everything_inside_the_safe_area():
+    app = kivy_app.GoApp(session=kivy_app.build_session(9, 7.5, 0, Color.BLACK),
+                         autosave=False)
+    root = app.build()
+    assert isinstance(root, kivy_app.SafeArea)
+    assert app.manager in root.children
+
+
+def test_touches_still_land_when_the_board_is_offset_by_an_inset():
+    """The safe area moves the board off the window origin. Drawing and
+    hit-testing both go through _to_widget/_from_widget, so they cannot
+    disagree -- but nothing proved that with a non-zero origin until now,
+    and every earlier test pinned the widget at (0, 0)."""
+    session = kivy_app.build_session(9, 7.5, 0, Color.BLACK)
+    widget = kivy_app.BoardWidget(session)
+    widget.pos = (0, 144)     # navigation bar below
+    widget.size = (600, 900)  # status bar above already taken off the height
+
+    target = (2, 6)
+    x, y = widget._to_widget(*pixel_at_point(target, widget.layout))
+    widget.on_touch_down(_Touch((x, y)))
+    assert session.pending_point == target

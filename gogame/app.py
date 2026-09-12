@@ -45,7 +45,7 @@ from kivy.uix.scrollview import ScrollView  # noqa: E402
 from kivy.uix.spinner import Spinner  # noqa: E402
 from kivy.uix.widget import Widget  # noqa: E402
 
-from . import rulebook, skin, storage
+from . import rulebook, safearea, skin, storage
 from .board import Color
 from .bot import Engine, HeuristicBot
 from .layout import column_label, compute_layout, pixel_at_point, point_at_pixel, row_label
@@ -54,7 +54,7 @@ from .session import GameSession, Phase
 
 __all__ = [
     "GoApp", "BoardWidget", "PanelButton", "PanelSpinner", "StoneBadge",
-    "RulesScreen", "ResultScreen", "build_session",
+    "RulesScreen", "ResultScreen", "SafeArea", "build_session",
 ]
 
 BOARD_SIZES = [9, 13, 19]
@@ -73,6 +73,12 @@ BUTTON_HEIGHT_DP = 60  # comfortably above Android's 48dp touch minimum
 AID_HEIGHT_DP = 46     # secondary row: still over the 48dp target with padding
 CORNER_DP = 6
 SLAB_INSET_DP = 6  # narrow strip of table showing around the board
+
+# Android does not hand over the bar sizes until its view is attached, so
+# the first read can come back empty. Poll briefly at startup; after that
+# a rotation or a change of navigation mode arrives as a window resize.
+INSET_POLL_SECONDS = 0.4
+INSET_POLL_WINDOW = 8.0
 
 # Texture resolutions. All powers of two: GLES2 will not mipmap a
 # non-power-of-two texture, and without mipmaps a 128px stone scaled down
@@ -601,6 +607,49 @@ def _wood_fill(widget):
     return rect
 
 
+class SafeArea(BoxLayout):
+    """Root container that keeps the UI out from under the system bars.
+
+    Only the *content* is inset. The wood is painted across the whole
+    widget, behind the padding, so on a phone with a translucent gesture
+    bar the board still runs to the edge of the glass instead of stopping
+    at a hard line.
+
+    Everywhere that reports no insets -- desktop, and Android up to 14,
+    where the framework fits the window itself -- the padding is zero and
+    this is an ordinary BoxLayout.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        _wood_fill(self)
+        self._applied = None
+        self._elapsed = 0.0
+        self._sync()
+        Clock.schedule_interval(self._poll, INSET_POLL_SECONDS)
+        Window.bind(size=lambda *_: self.reread())
+
+    def reread(self, *_args) -> None:
+        safearea.refresh()
+        self._sync()
+
+    def _poll(self, dt: float) -> bool:
+        """Stop once the insets have settled; a resize re-reads them."""
+        self._elapsed += dt
+        safearea.refresh()
+        self._sync()
+        if self._elapsed >= INSET_POLL_WINDOW:
+            return False  # unscheduling: Clock stops repeating on False
+        return True
+
+    def _sync(self, *_args) -> None:
+        insets = safearea.current()
+        if insets == self._applied:
+            return
+        self._applied = insets
+        self.padding = insets.padding()
+
+
 class BoardScreen(Screen):
     def __init__(self, app: "GoApp", **kwargs):
         super().__init__(**kwargs)
@@ -1000,7 +1049,13 @@ class GoApp(App):
         self.board_screen.refresh()
         Window.bind(on_keyboard=self._on_keyboard)
         self._tick_event = Clock.schedule_interval(self._tick, BOT_TICK_SECONDS)
-        return self.manager
+
+        # Everything lives inside the safe area, so no screen has to think
+        # about the system bars for itself.
+        safearea.start()
+        self.root_area = SafeArea()
+        self.root_area.add_widget(self.manager)
+        return self.root_area
 
     # -- flow ------------------------------------------------------------
 
@@ -1068,6 +1123,8 @@ class GoApp(App):
         return True  # False would let Android kill and restart the app
 
     def on_resume(self) -> None:
+        # The navigation mode can have been changed while the app was away.
+        self.root_area.reread()
         self.board_screen.refresh()
 
     def on_stop(self) -> None:
