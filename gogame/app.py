@@ -29,6 +29,7 @@ os.environ.setdefault("KIVY_NO_ARGS", "1")
 
 from typing import Callable, Dict, List, Optional, Tuple  # noqa: E402
 
+from kivy.animation import Animation  # noqa: E402
 from kivy.app import App  # noqa: E402
 from kivy.clock import Clock  # noqa: E402
 from kivy.core.text import Label as CoreLabel  # noqa: E402
@@ -37,6 +38,7 @@ from kivy.graphics import Color as Paint  # noqa: E402
 from kivy.graphics import Rectangle, RoundedRectangle  # noqa: E402
 from kivy.graphics.texture import Texture  # noqa: E402
 from kivy.metrics import Metrics, dp  # noqa: E402
+from kivy.properties import NumericProperty  # noqa: E402
 from kivy.uix.boxlayout import BoxLayout  # noqa: E402
 from kivy.uix.button import Button  # noqa: E402
 from kivy.uix.label import Label  # noqa: E402
@@ -45,7 +47,7 @@ from kivy.uix.scrollview import ScrollView  # noqa: E402
 from kivy.uix.spinner import Spinner  # noqa: E402
 from kivy.uix.widget import Widget  # noqa: E402
 
-from . import rulebook, safearea, skin, storage
+from . import lessons, rulebook, safearea, skin, storage
 from .board import Color
 from .bot import Engine, HeuristicBot
 from .layout import column_label, compute_layout, pixel_at_point, point_at_pixel, row_label
@@ -54,7 +56,8 @@ from .session import GameSession, Phase
 
 __all__ = [
     "GoApp", "BoardWidget", "PanelButton", "PanelSpinner", "StoneBadge",
-    "RulesScreen", "ResultScreen", "SafeArea", "build_session",
+    "RulesScreen", "ResultScreen", "SafeArea", "BoardCanvas", "LessonBoard",
+    "TutorialScreen", "build_session",
 ]
 
 BOARD_SIZES = [9, 13, 19]
@@ -79,6 +82,12 @@ SLAB_INSET_DP = 6  # narrow strip of table showing around the board
 # a rotation or a change of navigation mode arrives as a window resize.
 INSET_POLL_SECONDS = 0.4
 INSET_POLL_WINDOW = 8.0
+
+# Tutorial timing. The played stone lands over the first part of the step
+# and whatever it captures fades out over the rest, so cause visibly comes
+# before effect instead of everything changing at once.
+STEP_SECONDS = 0.9
+PLACE_FRACTION = 0.45
 
 # Texture resolutions. All powers of two: GLES2 will not mipmap a
 # non-power-of-two texture, and without mipmaps a 128px stone scaled down
@@ -207,8 +216,11 @@ def _shadow_texture() -> Texture:
     return _texture("shadow", lambda: skin.soft_shadow_pixels(SHADOW_TEXELS))
 
 
-def _ring_texture() -> Texture:
-    return _texture("ring", lambda: skin.ring_pixels(RING_TEXELS, skin.MARKER, 0.17))
+def _ring_texture(color: skin.RGB = skin.MARKER, key: str = "marker",
+                  thickness: float = 0.17) -> Texture:
+    return _texture(
+        f"ring-{key}", lambda: skin.ring_pixels(RING_TEXELS, color, thickness)
+    )
 
 
 def _cross_texture() -> Texture:
@@ -238,14 +250,17 @@ def _label_texture(text: str, font_size: int) -> Texture:
     return texture
 
 
-class BoardWidget(Widget):
-    """Draws the board and turns touches into session taps."""
+class BoardCanvas(Widget):
+    """Wood, grid and stones: the parts of a board every screen draws alike.
 
-    def __init__(self, session: GameSession, on_change: Optional[Callable[[], None]] = None, **kwargs):
-        super().__init__(**kwargs)
-        self.session = session
-        self.on_change = on_change
-        self.bind(pos=self.redraw, size=self.redraw)
+    Split out so the tutorial can show a five-line board without a second
+    copy of this drawing code drifting away from the real one. Subclasses
+    supply `board_size` and their own `redraw`.
+    """
+
+    @property
+    def board_size(self) -> int:
+        raise NotImplementedError
 
     @property
     def layout(self):
@@ -255,7 +270,7 @@ class BoardWidget(Widget):
         # letters on the table below the wood.
         inset = 2 * dp(SLAB_INSET_DP)
         return compute_layout(
-            self.session.game.board.size,
+            self.board_size,
             max(1, int(self.width - inset)),
             max(1, int(self.height - inset)),
             Metrics.density,
@@ -274,39 +289,12 @@ class BoardWidget(Widget):
         inset = dp(SLAB_INSET_DP)
         return wx - self.x - inset, self.top - inset - wy
 
-    # -- input -----------------------------------------------------------
+    def _star_points(self, size: int) -> List:
+        try:
+            return standard_handicap_points(size, 9)
+        except ValueError:
+            return []
 
-    def on_touch_down(self, touch) -> bool:
-        if not self.collide_point(*touch.pos):
-            return False
-        lx, ly = self._from_widget(*touch.pos)
-        point = point_at_pixel(lx, ly, self.layout)
-        if point is not None and self.session.tap_point(point):
-            self.redraw()
-            if self.on_change is not None:
-                self.on_change()
-        return True
-
-    # -- drawing -----------------------------------------------------------
-
-    def redraw(self, *_args) -> None:
-        self.canvas.clear()
-        session = self.session
-        lay = self.layout
-        size = session.game.board.size
-        density = max(1.0, Metrics.density)
-
-        # Kivy's `with canvas` pushes a thread-local context, so the
-        # instructions created by these helpers land on this canvas.
-        with self.canvas:
-            self._draw_table()
-            self._draw_slab(lay)
-            self._draw_grid(lay, size, density)
-            self._draw_star_points(lay, size)
-            self._draw_hints(session, lay)
-            self._draw_coordinate_labels(lay, size)
-            self._draw_stones(session.game.board, lay)
-            self._draw_annotations(session, lay)
 
     def _draw_table(self) -> None:
         """Dark wood under everything.
@@ -399,27 +387,6 @@ class BoardWidget(Widget):
                 size=(radius * 2, radius * 2),
             )
 
-    def _draw_hints(self, session, lay) -> None:
-        """A dot on every point the side to move may legally play.
-
-        Smaller than a star point and translucent, because on an open
-        board this is nearly every intersection -- the information the
-        player is actually after is where the dots are *missing*.
-        """
-        points = session.hint_points()
-        if not points:
-            return
-        radius = max(dp(2.0), lay.cell / 8.0)
-        texture = _dot_texture(skin.HINT, "hint")
-        Paint(1, 1, 1, 0.5)
-        for point in points:
-            x, y = self._to_widget(*pixel_at_point(point, lay))
-            Rectangle(
-                texture=texture,
-                pos=(x - radius, y - radius),
-                size=(radius * 2, radius * 2),
-            )
-
     def _draw_stones(self, board, lay) -> None:
         radius = lay.stone_radius
         shadow = _shadow_texture()
@@ -440,6 +407,100 @@ class BoardWidget(Widget):
             )
             Rectangle(
                 texture=_stone_texture(stone),
+                pos=(x - radius, y - radius),
+                size=(radius * 2, radius * 2),
+            )
+
+    def _draw_coordinate_labels(self, lay, size: int) -> None:
+        font_size = lay.label_font_size
+        # 0.6 of the margin, not half: at half, the corner labels (row "1"
+        # and column "A") crowd each other and the outer grid line.
+        gap = int(lay.margin * 0.6)
+        for i in range(size):
+            x, _y = self._to_widget(lay.origin_x + i * lay.cell, 0)
+            _bx, baseline = self._to_widget(0, lay.origin_y + lay.span + gap)
+            self._blit_centred(column_label(i), x, baseline, font_size)
+
+            _x2, y2 = self._to_widget(0, lay.origin_y + i * lay.cell)
+            left, _ = self._to_widget(lay.origin_x - gap, 0)
+            self._blit_centred(str(row_label(i, size)), left, y2, font_size)
+
+    def _blit_centred(self, text: str, cx: float, cy: float, font_size: int) -> None:
+        texture = _label_texture(text, font_size)
+        Paint(1, 1, 1, 1)
+        # Whole pixels: a glyph texture drawn on a half pixel is resampled
+        # and comes out soft, which at this size looks like a bad font.
+        Rectangle(
+            texture=texture,
+            pos=(round(cx - texture.width / 2), round(cy - texture.height / 2)),
+            size=texture.size,
+        )
+
+
+class BoardWidget(BoardCanvas):
+    """Draws a game in progress and turns touches into session taps."""
+
+    def __init__(self, session: GameSession, on_change: Optional[Callable[[], None]] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.session = session
+        self.on_change = on_change
+        self.bind(pos=self.redraw, size=self.redraw)
+
+    @property
+    def board_size(self) -> int:
+        return self.session.game.board.size
+
+    # -- input -----------------------------------------------------------
+
+    def on_touch_down(self, touch) -> bool:
+        if not self.collide_point(*touch.pos):
+            return False
+        lx, ly = self._from_widget(*touch.pos)
+        point = point_at_pixel(lx, ly, self.layout)
+        if point is not None and self.session.tap_point(point):
+            self.redraw()
+            if self.on_change is not None:
+                self.on_change()
+        return True
+
+    # -- drawing -----------------------------------------------------------
+
+    def redraw(self, *_args) -> None:
+        self.canvas.clear()
+        session = self.session
+        lay = self.layout
+        size = session.game.board.size
+        density = max(1.0, Metrics.density)
+
+        # Kivy's `with canvas` pushes a thread-local context, so the
+        # instructions created by these helpers land on this canvas.
+        with self.canvas:
+            self._draw_table()
+            self._draw_slab(lay)
+            self._draw_grid(lay, size, density)
+            self._draw_star_points(lay, size)
+            self._draw_hints(session, lay)
+            self._draw_coordinate_labels(lay, size)
+            self._draw_stones(session.game.board, lay)
+            self._draw_annotations(session, lay)
+
+    def _draw_hints(self, session, lay) -> None:
+        """A dot on every point the side to move may legally play.
+
+        Smaller than a star point and translucent, because on an open
+        board this is nearly every intersection -- the information the
+        player is actually after is where the dots are *missing*.
+        """
+        points = session.hint_points()
+        if not points:
+            return
+        radius = max(dp(2.0), lay.cell / 8.0)
+        texture = _dot_texture(skin.HINT, "hint")
+        Paint(1, 1, 1, 0.5)
+        for point in points:
+            x, y = self._to_widget(*pixel_at_point(point, lay))
+            Rectangle(
+                texture=texture,
                 pos=(x - radius, y - radius),
                 size=(radius * 2, radius * 2),
             )
@@ -493,37 +554,6 @@ class BoardWidget(Widget):
                     pos=(x - arm, y - arm),
                     size=(arm * 2, arm * 2),
                 )
-
-    def _star_points(self, size: int) -> List:
-        try:
-            return standard_handicap_points(size, 9)
-        except ValueError:
-            return []
-
-    def _draw_coordinate_labels(self, lay, size: int) -> None:
-        font_size = lay.label_font_size
-        # 0.6 of the margin, not half: at half, the corner labels (row "1"
-        # and column "A") crowd each other and the outer grid line.
-        gap = int(lay.margin * 0.6)
-        for i in range(size):
-            x, _y = self._to_widget(lay.origin_x + i * lay.cell, 0)
-            _bx, baseline = self._to_widget(0, lay.origin_y + lay.span + gap)
-            self._blit_centred(column_label(i), x, baseline, font_size)
-
-            _x2, y2 = self._to_widget(0, lay.origin_y + i * lay.cell)
-            left, _ = self._to_widget(lay.origin_x - gap, 0)
-            self._blit_centred(str(row_label(i, size)), left, y2, font_size)
-
-    def _blit_centred(self, text: str, cx: float, cy: float, font_size: int) -> None:
-        texture = _label_texture(text, font_size)
-        Paint(1, 1, 1, 1)
-        # Whole pixels: a glyph texture drawn on a half pixel is resampled
-        # and comes out soft, which at this size looks like a bad font.
-        Rectangle(
-            texture=texture,
-            pos=(round(cx - texture.width / 2), round(cy - texture.height / 2)),
-            size=texture.size,
-        )
 
 
 class _Lacquered:
@@ -593,6 +623,21 @@ def _fill(widget, color: skin.RGB, alpha: float = 1.0):
     return rect
 
 
+def _rounded_fill(widget, color: skin.RGB, alpha: float = 1.0):
+    """Flat rounded background behind `widget`, kept in step with it."""
+    with widget.canvas.before:
+        Paint(*color, alpha)
+        rect = RoundedRectangle(pos=widget.pos, size=widget.size,
+                                radius=[dp(CORNER_DP)])
+
+    def sync(*_args) -> None:
+        rect.pos = widget.pos
+        rect.size = widget.size
+
+    widget.bind(pos=sync, size=sync)
+    return rect
+
+
 def _wood_fill(widget):
     """Table wood behind `widget`, for the screens that are not the board."""
     with widget.canvas.before:
@@ -648,6 +693,227 @@ class SafeArea(BoxLayout):
             return
         self._applied = insets
         self.padding = insets.padding()
+
+
+def _fraction(value: float) -> float:
+    return 0.0 if value < 0.0 else (1.0 if value > 1.0 else value)
+
+
+class LessonBoard(BoardCanvas):
+    """A small board that animates one tutorial step at a time.
+
+    `progress` runs 0 to 1 across a step. Stones being played scale and
+    fade in over the first stretch of it; stones being captured fade and
+    shrink away over the rest. Splitting the step in two is the whole
+    point -- a capture that happened at the same instant as the move would
+    not read as being caused by it.
+    """
+
+    progress = NumericProperty(1.0)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._step = None
+        self.bind(pos=self.redraw, size=self.redraw, progress=self.redraw)
+
+    @property
+    def board_size(self) -> int:
+        return self._step.board.size if self._step is not None else lessons.SIZE
+
+    @property
+    def step(self):
+        return self._step
+
+    def show(self, step, animate: bool = True) -> None:
+        self._step = step
+        Animation.cancel_all(self, "progress")
+        if animate and step.animates:
+            self.progress = 0.0
+            Animation(progress=1.0, duration=STEP_SECONDS, t="out_cubic").start(self)
+        else:
+            self.progress = 1.0
+        self.redraw()
+
+    def redraw(self, *_args) -> None:
+        self.canvas.clear()
+        step = self._step
+        if step is None:
+            return
+        lay = self.layout
+        with self.canvas:
+            self._draw_table()
+            self._draw_slab(lay)
+            self._draw_grid(lay, step.board.size, max(1.0, Metrics.density))
+            self._draw_lesson_stones(step, lay)
+            self._draw_marks(step, lay)
+
+    def _draw_lesson_stones(self, step, lay) -> None:
+        radius = lay.stone_radius
+        shadow = _shadow_texture()
+        landing = _fraction(self.progress / PLACE_FRACTION)
+        leaving = _fraction((self.progress - PLACE_FRACTION) / (1.0 - PLACE_FRACTION))
+
+        for point in step.board.all_points():
+            stone = step.board.get(point)
+            if stone == Color.EMPTY:
+                continue
+            if point == step.played:
+                self._blit_stone(point, stone, lay,
+                                 radius * (0.55 + 0.45 * landing), landing, shadow)
+            else:
+                self._blit_stone(point, stone, lay, radius, 1.0, shadow)
+
+        # Drawn from the position *before* the capture: they are already off
+        # the board by this step, and this is them leaving it.
+        remaining = 1.0 - leaving
+        for point, stone in step.captured:
+            self._blit_stone(point, stone, lay,
+                             radius * (0.6 + 0.4 * remaining), remaining, shadow)
+
+    def _blit_stone(self, point, color, lay, radius: float, alpha: float, shadow) -> None:
+        if alpha <= 0.0 or radius <= 0.0:
+            return
+        x, y = self._to_widget(*pixel_at_point(point, lay))
+        halo = radius * 1.32
+        offset = radius * 0.13
+        Paint(1, 1, 1, alpha)
+        Rectangle(
+            texture=shadow,
+            pos=(x - halo + offset, y - halo - offset),
+            size=(halo * 2, halo * 2),
+        )
+        Rectangle(
+            texture=_stone_texture(color),
+            pos=(x - radius, y - radius),
+            size=(radius * 2, radius * 2),
+        )
+
+    def _draw_marks(self, step, lay) -> None:
+        radius = lay.stone_radius
+        if step.marks:
+            # Green, matching the Show moves dots on the real board, so the
+            # two mean the same thing: a point in play.
+            ring = _ring_texture(skin.HINT, "hint", 0.24)
+            size = radius * 0.78
+            Paint(1, 1, 1, 0.95)
+            for point in step.marks:
+                x, y = self._to_widget(*pixel_at_point(point, lay))
+                Rectangle(texture=ring, pos=(x - size, y - size),
+                          size=(size * 2, size * 2))
+
+        if step.forbidden is not None:
+            # The move that cannot be played, shown as a ghost of the stone
+            # with the same red cross that marks dead stones in scoring.
+            x, y = self._to_widget(*pixel_at_point(step.forbidden, lay))
+            Paint(1, 1, 1, 0.4)
+            Rectangle(
+                texture=_stone_texture(step.forbidden_color),
+                pos=(x - radius, y - radius),
+                size=(radius * 2, radius * 2),
+            )
+            arm = radius * 1.05
+            Paint(1, 1, 1, 1)
+            Rectangle(texture=_cross_texture(), pos=(x - arm, y - arm),
+                      size=(arm * 2, arm * 2))
+
+
+class TutorialScreen(Screen):
+    """Walks through lessons.STEPS one tap at a time."""
+
+    def __init__(self, app: "GoApp", **kwargs):
+        super().__init__(**kwargs)
+        self.app = app
+        self._index = 0
+
+        root = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        _wood_fill(root)
+
+        # Counter and title on separate lines. On one line the longer
+        # lesson names wrapped, and a fixed-height Label clips what wraps.
+        self.counter = Label(
+            text="", color=(*skin.TEXT_MUTED, 1), font_size=dp(13),
+            size_hint_y=None, height=dp(20), halign="center", valign="middle",
+        )
+        self.counter.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+        self.heading = Label(
+            text="", color=(*skin.TEXT, 1), bold=True, font_size=dp(19),
+            size_hint_y=None, height=dp(30), halign="center", valign="middle",
+        )
+        self.heading.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+
+        # Flexible, not square. The grid is limited by width either way --
+        # compute_layout squares it off -- so giving the widget the leftover
+        # height just makes the slab bigger instead of leaving a dark gap,
+        # the same way the playing board does it.
+        self.board = LessonBoard()
+
+        # Fixed, and tall enough for the longest caption: a box that resized
+        # itself per step would jump about as you tapped through.
+        box = BoxLayout(padding=dp(14), size_hint_y=None, height=dp(146))
+        _rounded_fill(box, skin.PANEL_BG)
+        self.caption = Label(
+            text="", color=(*skin.TEXT, 1), font_size=dp(15),
+            halign="left", valign="middle",
+        )
+        self.caption.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+        box.add_widget(self.caption)
+
+        steps = BoxLayout(spacing=dp(10), size_hint_y=None, height=dp(56))
+        self.back = PanelButton(text="Back", font_size=dp(16))
+        self.back.bind(on_release=lambda *_: self.previous_step())
+        self.forward = PanelButton(text="Next", font_size=dp(16), bold=True)
+        self.forward.bind(on_release=lambda *_: self.next_step())
+        steps.add_widget(self.back)
+        steps.add_widget(self.forward)
+
+        close = PanelButton(text="Back to the rules", font_size=dp(14),
+                            size_hint_y=None, height=dp(44))
+        close.bind(on_release=lambda *_: self.app.show_rules())
+
+        root.add_widget(self.counter)
+        root.add_widget(self.heading)
+        root.add_widget(self.board)
+        root.add_widget(box)
+        root.add_widget(steps)
+        root.add_widget(close)
+        self.add_widget(root)
+
+    # -- walking through --------------------------------------------------
+
+    def start(self) -> None:
+        """From the beginning, with the first position simply present
+        rather than animating in from nothing."""
+        self._index = 0
+        self._show(animate=False)
+
+    def _show(self, animate: bool = True) -> None:
+        step = lessons.STEPS[self._index]
+        self.counter.text = (
+            f"Lesson {step.lesson_number} of {len(lessons.LESSONS)}"
+            f"   ·   Step {step.number} of {step.total}"
+        )
+        self.heading.text = step.lesson
+        self.caption.text = step.caption
+        self.board.show(step, animate=animate)
+        self.back.disabled = self._index == 0
+        self.forward.text = "Done" if self._at_end else "Next"
+
+    @property
+    def _at_end(self) -> bool:
+        return self._index >= len(lessons.STEPS) - 1
+
+    def next_step(self) -> None:
+        if self._at_end:
+            self.app.show_rules()
+            return
+        self._index += 1
+        self._show()
+
+    def previous_step(self) -> None:
+        if self._index == 0:
+            return
+        self._index -= 1
+        self._show()
 
 
 class BoardScreen(Screen):
@@ -978,6 +1244,15 @@ class RulesScreen(Screen):
             )
         )
 
+        # Above the text, not buried under it: the worked examples teach
+        # capture far better than the paragraph about it does.
+        walk = PanelButton(
+            text="Show me on a board", font_size=dp(16), bold=True,
+            size_hint_y=None, height=dp(52),
+        )
+        walk.bind(on_release=lambda *_: self.app.show_tutorial())
+        root.add_widget(walk)
+
         scroll = ScrollView(do_scroll_x=False, bar_width=dp(3))
         column = BoxLayout(
             orientation="vertical", size_hint_y=None, spacing=dp(6),
@@ -1041,9 +1316,10 @@ class GoApp(App):
         self.new_game_screen = NewGameScreen(self, name="new")
         self.rules_screen = RulesScreen(self, name="rules")
         self.result_screen = ResultScreen(self, name="result")
+        self.tutorial_screen = TutorialScreen(self, name="tutorial")
         for screen in (
             self.board_screen, self.new_game_screen,
-            self.rules_screen, self.result_screen,
+            self.rules_screen, self.result_screen, self.tutorial_screen,
         ):
             self.manager.add_widget(screen)
         self.board_screen.refresh()
@@ -1067,6 +1343,10 @@ class GoApp(App):
 
     def show_rules(self) -> None:
         self.manager.current = "rules"
+
+    def show_tutorial(self) -> None:
+        self.tutorial_screen.start()
+        self.manager.current = "tutorial"
 
     def show_result(self) -> None:
         self.result_screen.refresh()
@@ -1113,6 +1393,9 @@ class GoApp(App):
     def _on_keyboard(self, _window, key, *_args) -> bool:
         if key != 27:  # ESC, and Android's BACK button
             return False
+        if self.manager.current == "tutorial":
+            self.manager.current = "rules"  # back the way they came in
+            return True
         if self.manager.current != "board":
             self.manager.current = "board"
             return True

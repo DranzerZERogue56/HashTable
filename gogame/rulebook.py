@@ -59,6 +59,8 @@ SECTIONS: Tuple[Section, ...] = (
             "When your opponent fills the last liberty of one of your "
             "groups, the whole group is captured and taken off the board at "
             "once, however large it is.",
+            "This is the part worth seeing rather than reading. Tap Show me "
+            "on a board at the top of this page and step through it.",
         ),
     ),
     Section(

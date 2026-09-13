@@ -26,7 +26,7 @@ try:
 except Exception as exc:  # pragma: no cover - depends on the machine, not the code
     pytest.skip(f"Kivy UI unavailable: {exc}", allow_module_level=True)
 
-from gogame import rulebook, safearea
+from gogame import lessons, rulebook, safearea
 from gogame.board import Color
 from gogame.layout import pixel_at_point
 from gogame.session import Phase
@@ -307,3 +307,108 @@ def test_touches_still_land_when_the_board_is_offset_by_an_inset():
     x, y = widget._to_widget(*pixel_at_point(target, widget.layout))
     widget.on_touch_down(_Touch((x, y)))
     assert session.pending_point == target
+
+
+# -- the animated tutorial -------------------------------------------------
+
+
+def test_the_lesson_board_draws_every_step_without_complaint():
+    """The one that would catch a lesson referring to a point off the board
+    or a colour the renderer has no texture for."""
+    board = kivy_app.LessonBoard()
+    board.pos = (0, 0)
+    board.size = (500, 500)
+    for step in lessons.STEPS:
+        board.show(step, animate=False)
+
+
+def test_the_lesson_board_draws_part_way_through_an_animation():
+    """Mid-step the renderer is asked for fractional sizes and alphas, and
+    for stones that are on neither the old board nor the new one."""
+    board = kivy_app.LessonBoard()
+    board.pos = (0, 0)
+    board.size = (500, 500)
+    capture = next(s for s in lessons.STEPS if s.captured)
+    board.show(capture, animate=False)
+    for progress in (0.0, 0.2, 0.45, 0.7, 1.0):
+        board.progress = progress
+
+
+def test_a_step_with_nothing_moving_is_not_animated():
+    board = kivy_app.LessonBoard()
+    board.size = (500, 500)
+    still = next(s for s in lessons.STEPS if not s.animates)
+    board.show(still)
+    assert board.progress == 1.0
+
+
+def test_the_tutorial_starts_at_the_beginning():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    assert app.manager.current == "tutorial"
+    screen = app.tutorial_screen
+    assert screen.board.step is lessons.STEPS[0]
+    assert screen.caption.text == lessons.STEPS[0].caption
+    assert screen.back.disabled is True
+
+
+def test_next_and_back_walk_the_steps():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    screen = app.tutorial_screen
+    screen.next_step()
+    assert screen.board.step is lessons.STEPS[1]
+    assert screen.back.disabled is False
+    screen.previous_step()
+    assert screen.board.step is lessons.STEPS[0]
+
+
+def test_back_does_nothing_at_the_first_step():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    screen = app.tutorial_screen
+    screen.previous_step()
+    assert screen.board.step is lessons.STEPS[0]
+
+
+def test_the_last_step_offers_done_and_returns_to_the_rules():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    screen = app.tutorial_screen
+    for _ in range(len(lessons.STEPS) - 1):
+        screen.next_step()
+    assert screen.forward.text == "Done"
+    screen.next_step()
+    assert app.manager.current == "rules"
+
+
+def test_the_heading_names_the_lesson_and_the_step():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    screen = app.tutorial_screen
+    screen.next_step()
+    step = lessons.STEPS[1]
+    assert step.lesson in screen.heading.text
+    assert f"Step {step.number} of {step.total}" in screen.counter.text
+
+
+def test_the_rules_screen_offers_the_walkthrough():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    assert "Show me on a board" in _texts(app.rules_screen)
+
+
+def test_back_from_the_tutorial_returns_to_the_rules_not_the_board():
+    """It was opened from the rules, so that is where back belongs."""
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    assert app._on_keyboard(None, 27) is True
+    assert app.manager.current == "rules"
+
+
+def test_reopening_the_tutorial_starts_over():
+    app = _built_app(kivy_app.build_session(9, 7.5, 0, Color.BLACK))
+    app.show_tutorial()
+    app.tutorial_screen.next_step()
+    app.tutorial_screen.next_step()
+    app.show_tutorial()
+    assert app.tutorial_screen.board.step is lessons.STEPS[0]
